@@ -103,8 +103,19 @@ npm run web -w @budgi/mobile          # preview in a browser, choose “Explore 
 
 ## Run it on your iPhone
 
-Plaid Link, SQLCipher and Face ID are native modules, so use a development
-build rather than Expo Go. On a Mac with a recent Xcode:
+**Fastest (Expo Go, ~2 minutes):** install [Expo Go](https://apps.apple.com/app/expo-go/id982107779)
+on your iPhone, then on your Mac (same Wi-Fi):
+
+```bash
+npm install
+npm run go -w @budgi/mobile           # scan the QR code with the iPhone Camera
+```
+
+Demo data, SimpleFIN, rules, budgets and Face ID lock all work in Expo Go.
+Plaid Link and on-device encryption need the development build below.
+
+**Full app (development build):** Plaid Link and SQLCipher are native modules,
+so build the app yourself. On a Mac with a recent Xcode:
 
 ```bash
 npm install
