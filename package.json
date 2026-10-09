@@ -1,0 +1,20 @@
+{
+  "name": "budgi",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Minimal, private, fast budgeting for iOS and Mac.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "npm run test -w @budgi/core -w @budgi/server",
+    "typecheck": "npm run typecheck -w @budgi/core -w @budgi/server -w @budgi/mobile",
+    "server": "npm run dev -w @budgi/server",
+    "server:pair": "npm run pair -w @budgi/server",
+    "mobile": "npm run start -w @budgi/mobile"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
