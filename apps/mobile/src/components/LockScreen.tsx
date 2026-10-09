@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { View } from 'react-native';
 import Animated, { FadeIn, FadeOut, useAnimatedStyle, useSharedValue, withRepeat, withSequence, withTiming } from 'react-native-reanimated';
-import { biometryLabel, useLock } from '@/lib/lock';
+import { biometryLabel, LOCK_AUTO_PROMPT, useLock } from '@/lib/lock';
 import { haptic } from '@/lib/haptics';
 import { radius, useTheme } from '@/lib/theme';
 import { BudgiMark } from './BudgiMark';
@@ -18,6 +18,7 @@ export function LockScreen() {
   useEffect(() => {
     void biometryLabel().then(setLabel);
     breathe.value = withRepeat(withSequence(withTiming(1.04, { duration: 1400 }), withTiming(1, { duration: 1400 })), -1);
+    if (!LOCK_AUTO_PROMPT) return;
     const id = setTimeout(() => void attempt(), 250);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps

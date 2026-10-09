@@ -1,6 +1,6 @@
 import { BlurView } from 'expo-blur';
 import { useEffect, useState } from 'react';
-import { AppState, Platform } from 'react-native';
+import { AppState } from 'react-native';
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { BudgiMark } from './BudgiMark';
 
@@ -11,7 +11,6 @@ import { BudgiMark } from './BudgiMark';
 export function PrivacyShield() {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
-    if (Platform.OS === 'web') return;
     const sub = AppState.addEventListener('change', (s) => setVisible(s !== 'active'));
     return () => sub.remove();
   }, []);

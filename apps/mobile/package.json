@@ -50,7 +50,8 @@
     "export:web": "expo export --platform web",
     "typecheck": "tsc --noEmit",
     "lint": "expo lint",
-    "go": "expo start --go"
+    "go": "expo start --go",
+    "build:pwa": "node scripts/build-pwa.mjs"
   },
   "private": true
 }

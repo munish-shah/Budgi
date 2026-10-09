@@ -66,7 +66,13 @@ export default function Settings() {
     <Screen>
       <ListGroup title="Accounts">
         <ListRow icon="building.columns.fill" iconColor="#3B82F6" title="Connected accounts" value={String(connections.length)} onPress={() => router.push('/settings/connect')} />
-        <ListRow icon="server.rack" iconColor="#6366F1" title="Relay server" value={relayUrl ? relayUrl.replace(/^https?:\/\//, '') : 'Not set up'} onPress={() => router.push('/pair')} />
+        <ListRow
+          icon="server.rack"
+          iconColor="#6366F1"
+          title={Platform.OS === 'web' ? 'Budgi server' : 'Relay server'}
+          value={Platform.OS === 'web' ? (relayUrl ? 'Paired' : 'Not paired') : relayUrl ? relayUrl.replace(/^https?:\/\//, '') : 'Not set up'}
+          onPress={() => router.push('/pair')}
+        />
       </ListGroup>
 
       <ListGroup title="Privacy & security" footer={lockWarning ?? `Budgi locks with ${bio} and hides its contents in the app switcher.`}>
@@ -77,7 +83,7 @@ export default function Settings() {
           icon="lock.shield.fill"
           iconColor={encrypted ? '#10B981' : '#F59E0B'}
           title="On-device encryption"
-          value={Platform.OS === 'web' ? 'Preview only' : encrypted ? 'AES-256' : 'Dev build needed'}
+          value={encrypted ? 'AES-256' : 'Dev build needed'}
         />
       </ListGroup>
 

@@ -1,9 +1,10 @@
 # Budgi
 
-A minimal, fast, private budgeting app for iPhone (and Apple Silicon Macs).
-Budgi connects to your banks, sorts every transaction into a category on its
-own, and lets you write rules for whatever it gets wrong. Everything stays
-encrypted on your phone, behind Face ID.
+A minimal, fast, private budgeting app for iPhone and Mac. Budgi connects to
+your banks, sorts every transaction into a category on its own, and lets you
+write rules for whatever it gets wrong. Everything stays encrypted on your
+device, behind Face ID. Install it free from Safari, with no App Store and no
+Xcode.
 
 <p align="center">
   <img src="docs/screenshots/home.png" width="200" alt="Home: spend this month, cumulative chart vs last month, budget pace" />
@@ -17,9 +18,8 @@ encrypted on your phone, behind Face ID.
   <img src="docs/screenshots/onboarding.png" width="200" alt="Onboarding" />
 </p>
 
-<sub>Screenshots are from the web preview build with demo data. On iOS the
-app uses SF Symbols, the native tab bar (Liquid Glass on iOS 26), native
-large titles and search, and native form sheets.</sub>
+<sub>Screenshots use demo data. The optional native iOS build swaps in SF
+Symbols, the Liquid Glass tab bar, and native sheets and large titles.</sub>
 
 ## What it does
 
@@ -56,132 +56,151 @@ large titles and search, and native form sheets.</sub>
   (Reanimated 4). The app opens from a local database, then syncs in the
   background.
 
+## Get it on your iPhone (free, no Xcode, nothing to keep running)
+
+Budgi deploys to **Cloudflare's free tier** as one address that serves both
+the app and its small API. You add it to your Home Screen from Safari and it
+opens full-screen like any other app, works offline, and unlocks with Face ID.
+Cloudflare runs the server part on demand, so nothing of yours has to stay on.
+
+**You need, once:** a computer with Node 22+, a free
+[Cloudflare account](https://dash.cloudflare.com/sign-up) (no card required),
+and optionally [Plaid keys](https://dashboard.plaid.com/signup) (choose
+**Personal use** for the free Trial plan).
+
+```bash
+git clone https://github.com/munish-shah/Budgi.git && cd Budgi
+npm install
+npm run deploy        # logs in to Cloudflare, builds, deploys, asks for Plaid keys
+```
+
+It prints your address (`https://budgi.<you>.workers.dev`) and a one-time
+**setup key**. Then, on your iPhone:
+
+1. Open the address in **Safari** → **Share** → **Add to Home Screen**, and
+   open Budgi from the Home Screen.
+2. **Settings → Budgi server** → enter the setup key. This pairs your phone. The
+   key then stops working, so nobody else can pair.
+3. **Settings → Accounts → Bank or card via Plaid** → **Continue to Plaid**,
+   sign in to your bank on Plaid's page, then switch back. Your accounts appear
+   automatically.
+
+To update later, run `git pull && npm run deploy`. Your data and pairing are
+kept. To add your Mac or another device, go to **Settings → Budgi server →
+Create a pairing code** on your phone, then enter the code on the other device.
+
+<sub>Free-tier headroom: Cloudflare allows ~100,000 requests/day; a day of
+Budgi use is a few dozen. Plaid's Trial plan covers a limited number of
+connected banks. SimpleFIN (optional) costs about $15/year.</sub>
+
+<details>
+<summary>Deploying from a cloud session or CI instead</summary>
+
+`npm run deploy` also runs non-interactively. Set `CLOUDFLARE_API_TOKEN` (a
+token with the "Edit Cloudflare Workers" template plus D1 edit), and
+optionally `PLAID_CLIENT_ID`, `PLAID_SECRET` and `PLAID_ENV`, in the
+environment. The setup key is printed in the output.
+</details>
+
 ## Security in one paragraph
 
-Your bank password only ever goes to your bank, inside Plaid or SimpleFIN.
-Transactions are stored only on your phone, in a SQLCipher-encrypted database
-whose key is in the iOS Keychain (this device only, excluded from backups),
-behind Face ID. The app is blurred in the app switcher. For Plaid, a tiny relay
-you host holds the API keys and the bank tokens, encrypted with AES-256-GCM. It
-stores **no transactions**, and it only accepts requests signed by the
-Ed25519 key of a device you paired with a one-time code. Read the
-[full security model](docs/SECURITY.md).
+Your bank password only ever goes to your bank, on Plaid's page or SimpleFIN's.
+Your transactions are stored only on your device: AES-256 encrypted in the
+browser's storage under a key that page code can't read out (the native build
+uses SQLCipher with the key in the Keychain), behind Face ID via a device
+passkey. The server stores **no transactions**. It holds only the bank
+tokens, encrypted with AES-256-GCM, and accepts only requests signed by the
+Ed25519 key of a device you paired. The web app runs under a strict Content
+Security Policy, and its offline cache never stores API traffic. Read the
+[full security model](docs/SECURITY.md), including what trusting Cloudflare
+means.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  subgraph Phone["iPhone / Mac (Budgi app)"]
-    UI[Expo Router UI] --> Store[(SQLCipher DB\nkey in Keychain)]
+  subgraph Phone["iPhone (Home Screen web app) or native build"]
+    UI[Budgi UI] --> Store[(Encrypted on-device store)]
     UI --> Core[["@budgi/core\ncategorizer · rules · budgets"]]
-    Keys[[Keychain:\nEd25519 device key\nSimpleFIN access URL]]
+    Keys[[Ed25519 device key\nnever leaves the device]]
   end
-  subgraph Relay["Your relay (Mac mini / VPS / Pi)"]
-    API[Hono API\nsigned requests only] --> Tokens[(Plaid tokens\nAES-256-GCM)]
+  subgraph CF["Cloudflare free tier (your account)"]
+    Assets[Static app files] --- API[Relay API\nsigned requests only]
+    API --> D1[(D1: encrypted bank tokens\nno transactions)]
   end
-  UI -- "signed HTTPS\n(Tailscale)" --> API
-  API -- "client_id/secret" --> Plaid[(Plaid)]
-  UI -- "Basic auth over HTTPS" --> SF[(SimpleFIN Bridge)]
-  UI -. "Plaid Link SDK\n(bank login)" .-> Plaid
+  UI -- "signed HTTPS" --> API
+  API -- "keys stay here" --> Plaid[(Plaid)]
+  API --> SF[(SimpleFIN)]
+  UI -. "bank sign-in on Plaid's page\n(Hosted Link)" .-> Plaid
 ```
 
 ```
 packages/core   Pure TypeScript domain logic shared by app and server
                 (merchant cleaning + knowledge base, categorizer, rules engine,
                 budgets/pace, recurring detection, Plaid/SimpleFIN mappers,
-                pending→posted merging, request signing). 57 unit tests.
-apps/server     Plaid relay: Hono + node:sqlite, zero native deps. 12 tests.
-apps/mobile     Expo SDK 57 / React Native 0.86 app (iOS-first; web = preview).
+                pending→posted merging, request signing). 58 unit tests.
+apps/server     Relay API (Hono). Runs on Cloudflare Workers + D1, or on Node
+                with SQLite if you'd rather self-host. 21 tests.
+apps/mobile     Expo SDK 57 / React Native 0.86 app. Builds the installable
+                web app (PWA) and the native iOS app from the same code.
+scripts/        deploy.mjs: one-command Cloudflare deploy.
 ```
 
-## Quick start (no bank needed)
+## Try it locally (no bank needed)
 
 ```bash
 npm install
-npm run web -w @budgi/mobile          # preview in a browser, choose “Explore with demo data”
+npm run web -w @budgi/mobile          # opens in a browser; choose “Explore with demo data”
 ```
 
-## Run it on your iPhone
+To run the full stack locally in Cloudflare's runtime:
+`npm run build:pwa -w @budgi/mobile && npm run dev:cloud -w @budgi/server`,
+with `BUDGI_MASTER_KEY` and `BUDGI_SETUP_KEY` in `apps/server/.dev.vars`.
 
-**Fastest (Expo Go, ~2 minutes):** install [Expo Go](https://apps.apple.com/app/expo-go/id982107779)
-on your iPhone, then on your Mac (same Wi-Fi):
+## Bank connections
+
+- **Plaid** (recommended): 12,000+ institutions. Bank sign-in happens on
+  Plaid's own Hosted Link page in Safari, which also handles banks that send
+  you to their own site to log in (Chase and others). Your server collects
+  the result directly from Plaid; the access token never reaches your phone.
+  Try `sandbox` first with `user_good` / `pass_good`.
+- **SimpleFIN Bridge** (optional, about $15/year): read-only and controlled by
+  you at [beta-bridge.simplefin.org](https://beta-bridge.simplefin.org). Create
+  a Setup Token there and paste it in **Settings → Accounts**.
+- **Demo data**: five months of realistic sample data, removable anytime.
+
+## Native iOS app (optional)
+
+The same code also builds a fully native app: SF Symbols, Liquid Glass tab
+bar, native sheets, SQLCipher, and the Plaid Link SDK. Apple only allows that
+through Xcode (free, but it expires every 7 days) or the $99/year developer
+program:
 
 ```bash
-npm install
-npm run go -w @budgi/mobile           # scan the QR code with the iPhone Camera
-```
-
-Demo data, SimpleFIN, rules, budgets and Face ID lock all work in Expo Go.
-Plaid Link and on-device encryption need the development build below.
-
-**Full app (development build):** Plaid Link and SQLCipher are native modules,
-so build the app yourself. On a Mac with a recent Xcode:
-
-```bash
-npm install
 cd apps/mobile
-npx expo run:ios --device             # pick your iPhone; a free Apple ID works (7-day signing)
+npx expo run:ios --device             # needs a Mac with Xcode
 ```
 
-For a build that doesn't expire, use an Apple Developer account and
-`npx eas build --platform ios` (or Archive in Xcode), then install through
-TestFlight.
+On a Mac you can also just install the web app: open your address in Safari
+and choose **File → Add to Dock**. Apple Silicon Macs can also run the native
+build via Xcode's **My Mac (Designed for iPad)**. The native app can point at
+the same Cloudflare server: use **Settings → Relay server**, then pair with a
+code created on your phone.
 
-**On your Mac:** Apple Silicon Macs run the iOS app natively. In Xcode, choose
-**My Mac (Designed for iPad)** as the run destination, or install it from
-TestFlight on the Mac.
+<details>
+<summary>Self-hosting the relay instead of Cloudflare</summary>
 
-## Connect your accounts
+```bash
+cp apps/server/.env.example apps/server/.env
+npm run cli -w @budgi/server keygen     # → BUDGI_MASTER_KEY
+npm run cli -w @budgi/server setupkey   # → BUDGI_SETUP_KEY (optional)
+npm run server                          # or the Dockerfile in apps/server
+npm run server:pair                     # QR code for the native app
+```
 
-Budgi supports two bank-data providers. Use either or both.
-
-### Option A: SimpleFIN Bridge (no server, about $15/year)
-
-The simplest private option, and a favorite of the self-hosting community
-(Actual Budget uses it too). Read-only, and you control it.
-
-1. Create an account at [beta-bridge.simplefin.org](https://beta-bridge.simplefin.org) and connect your banks there.
-2. Create a new app connection and copy the **Setup Token**.
-3. In Budgi, go to **Settings → Accounts → SimpleFIN Bridge**, paste the token,
-   and tap **Connect**.
-
-The token is exchanged once for a private access URL, which is stored only in
-your Keychain. SimpleFIN data refreshes about once a day.
-
-### Option B: Plaid, through your private relay
-
-Plaid covers 12,000+ institutions with near-real-time pending transactions.
-It needs a server, because Plaid's API secret must never ship inside an app.
-
-1. **Get Plaid keys.** Sign up at [dashboard.plaid.com](https://dashboard.plaid.com/signup)
-   and choose **Personal use**. That gives you the free Trial plan with real
-   bank access (limited number of connected banks). Use `sandbox` first to try
-   it (log in with `user_good` / `pass_good`).
-2. **Configure the relay.**
-   ```bash
-   cp apps/server/.env.example apps/server/.env
-   npm run cli -w @budgi/server keygen   # paste the output into BUDGI_MASTER_KEY
-   # fill PLAID_CLIENT_ID, PLAID_SECRET, PLAID_ENV in apps/server/.env
-   ```
-3. **Run it** on an always-on machine (Mac mini, Raspberry Pi, small VPS):
-   ```bash
-   npm run server                        # dev (auto-reload)
-   # or: docker build -f apps/server/Dockerfile -t budgi-relay . && \
-   #     docker run -d --env-file apps/server/.env -v budgi:/data -p 127.0.0.1:8787:8787 budgi-relay
-   ```
-4. **Make it reachable privately.** With [Tailscale](https://tailscale.com) on
-   the server and your phone, run `tailscale serve --bg 8787`. You get
-   `https://<machine>.<tailnet>.ts.net`, which only your devices can reach. Set
-   that as `PUBLIC_URL`.
-5. **Pair your phone:** run `npm run server:pair`, then in Budgi go to
-   **Settings → Relay server → Scan pairing code**.
-6. In Budgi, go to **Settings → Accounts → Bank or card via Plaid** and sign in
-   to your bank inside Plaid Link.
-
-Banks that use OAuth (Chase and others) also need `PLAID_REDIRECT_URI`, set to
-a universal link you control and registered in the Plaid dashboard.
-
-Relay CLI: `npm run cli -w @budgi/server devices` (also `revoke <id>`, `items`, `keygen`).
+Expose it privately with `tailscale serve --bg 8787`. Relay CLI:
+`npm run cli -w @budgi/server devices` (also `revoke <id>`, `items`).
+</details>
 
 ## Why these choices
 
@@ -197,7 +216,8 @@ Budget):
 | Charts | `react-native-svg` + Reanimated (monotone cubic curves) | Small, scrubbable and themeable; no extra 3 MB Skia runtime for one chart. |
 | Long lists | **FlashList v2** | Recycling and sticky day headers keep thousands of transactions smooth. |
 | State | Zustand | Tiny and synchronous, with selectors to limit re-renders. |
-| Storage | `expo-sqlite` with **SQLCipher** | Encrypted at rest, with the key in the Keychain. |
+| Storage | **SQLCipher** (native) / AES-GCM-encrypted IndexedDB (web) | Encrypted at rest; keys in the Keychain or non-extractable WebCrypto keys. |
+| Getting it on your phone | **Installable web app on Cloudflare's free tier** | Native iOS apps need Xcode or $99/yr. A Home Screen web app is free, updates instantly, and the server runs on demand with nothing for you to keep running (the same model as self-hosted Actual Budget, minus the hardware). |
 | Bank data | **Plaid** (through a relay) and **SimpleFIN** | Plaid has the best coverage, and its "Personal use" Trial plan is the route for individuals; new Limited Production sign-ups closed for US/Canadian developers in April 2026. SimpleFIN needs no server and is popular with the privacy-minded self-hosting crowd. |
 | Categorization UX | Confidence + review inbox + "always?" rules | From the Copilot vs. Monarch debate: AI-style auto-categorization plus transparent rules, with the *why* shown on every transaction. |
 

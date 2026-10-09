@@ -1,5 +1,5 @@
 import type { Category } from '@budgi/core';
-import { Platform, Text, View } from 'react-native';
+import { View } from 'react-native';
 import { alpha } from '@/lib/theme';
 import { Icon } from './Icon';
 
@@ -16,11 +16,7 @@ export function CategoryIcon({ category, size = 40 }: { category: Category | und
         alignItems: 'center',
         justifyContent: 'center',
       }}>
-      {Platform.OS === 'ios' ? (
-        <Icon name={category?.icon ?? 'questionmark.circle.fill'} size={size * 0.46} color={color} />
-      ) : (
-        <Text style={{ fontSize: size * 0.46 }}>{category?.emoji ?? '❔'}</Text>
-      )}
+      <Icon name={category?.icon ?? 'questionmark.circle.fill'} size={size * 0.48} color={color} fallback={category?.emoji ?? '❔'} />
     </View>
   );
 }

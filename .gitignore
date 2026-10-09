@@ -9,3 +9,6 @@ coverage/
 *.db
 *.db-*
 *.sqlite
+.wrangler/
+.dev.vars
+wrangler.deploy.jsonc

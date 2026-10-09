@@ -1,36 +1,32 @@
 import type { Account, Transaction } from '@budgi/core';
 import type { Database, Snapshot } from './db.types';
+import { getAll, putMany, requestPersistence, wipeVault } from './web-vault';
 
 export type { Database, Snapshot } from './db.types';
 
 /**
- * Web preview store: in-memory only. The browser build exists to preview the
- * UI with demo data; real bank data is only ever handled by the iOS app.
+ * Web/PWA store: IndexedDB with every record encrypted (see web-vault.ts).
+ * Same interface as the native SQLCipher store.
  */
 export async function openDatabase(): Promise<Database> {
-  const accounts = new Map<string, Account>();
-  const transactions = new Map<string, Transaction>();
-  const kv = new Map<string, unknown>();
+  void requestPersistence();
   return {
-    encrypted: false,
+    encrypted: true,
     async load(): Promise<Snapshot> {
-      return { accounts: [...accounts.values()], transactions: [...transactions.values()], kv: Object.fromEntries(kv) };
+      const [accounts, transactions, kv] = await Promise.all([
+        getAll<Account>('accounts'),
+        getAll<Transaction>('transactions'),
+        getAll<unknown>('kv'),
+      ]);
+      return {
+        accounts: accounts.map((r) => r.value),
+        transactions: transactions.map((r) => r.value).sort((a, b) => b.date.localeCompare(a.date)),
+        kv: Object.fromEntries(kv.map((r) => [r.key, r.value])),
+      };
     },
-    async saveTransactions(upserts, deletes = []) {
-      for (const t of upserts) transactions.set(t.id, t);
-      for (const id of deletes) transactions.delete(id);
-    },
-    async saveAccounts(upserts, deletes = []) {
-      for (const a of upserts) accounts.set(a.id, a);
-      for (const id of deletes) accounts.delete(id);
-    },
-    async setKV(key, value) {
-      kv.set(key, value);
-    },
-    async wipe() {
-      accounts.clear();
-      transactions.clear();
-      kv.clear();
-    },
+    saveTransactions: (upserts, deletes = []) => putMany('transactions', upserts.map((t) => [t.id, t]), deletes),
+    saveAccounts: (upserts, deletes = []) => putMany('accounts', upserts.map((a) => [a.id, a]), deletes),
+    setKV: (key, value) => putMany('kv', [[key, value]]),
+    wipe: wipeVault,
   };
 }

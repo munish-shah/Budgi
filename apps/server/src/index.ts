@@ -2,11 +2,15 @@ import { serve } from '@hono/node-server';
 import { getConnInfo } from '@hono/node-server/conninfo';
 import { createApp, VERSION } from './app';
 import { loadConfig } from './config';
-import { Store } from './db';
+import { openNodeDatabase } from './node-sqlite';
 import { PlaidClient } from './plaid';
+import { Store } from './store';
 
-const config = loadConfig();
-const store = new Store(config.DATABASE_PATH);
+/** Self-hosted (Node) entry. For zero-maintenance hosting, see worker.ts. */
+const config = loadConfig(process.env);
+const db = openNodeDatabase(config.DATABASE_PATH);
+const store = new Store(db);
+await store.init();
 const plaid =
   config.PLAID_CLIENT_ID && config.PLAID_SECRET
     ? new PlaidClient(config.PLAID_CLIENT_ID, config.PLAID_SECRET, config.PLAID_ENV)
@@ -36,7 +40,7 @@ const server = serve({ fetch: app.fetch, hostname: config.HOST, port: config.POR
 
 const shutdown = () => {
   server.close();
-  store.close();
+  db.close();
   process.exit(0);
 };
 process.on('SIGINT', shutdown);

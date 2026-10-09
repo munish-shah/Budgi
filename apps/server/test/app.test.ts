@@ -5,10 +5,11 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { base64UrlEncode, keyPairFromSeed, signRequest } from '@budgi/core/auth';
 import type { PlaidTransaction } from '@budgi/core';
-import { createApp } from '../src/app';
-import { newPairingCode, normalizePairingCode, SecretBox } from '../src/crypto';
-import { Store } from '../src/db';
-import { PlaidError, type PlaidApi, type SyncPage } from '../src/plaid';
+import { createApp, readLinkResults } from '../src/app';
+import { newPairingCode, newSetupKey, normalizePairingCode, SecretBox } from '../src/crypto';
+import { openNodeDatabase } from '../src/node-sqlite';
+import { PlaidError, type LinkTokenGetResponse, type PlaidApi, type SyncPage } from '../src/plaid';
+import { Store } from '../src/store';
 
 const masterKey = randomBytes(32);
 
@@ -21,12 +22,18 @@ class FakePlaid implements PlaidApi {
   syncCalls: Array<string | undefined> = [];
   failNextSyncWith?: PlaidError;
   removed: string[] = [];
-  lastLinkOpts?: unknown;
-  async createLinkToken(opts: unknown) {
+  lastLinkOpts?: any;
+  linkGet: LinkTokenGetResponse = { link_token: 'link-sandbox-123', link_sessions: [] };
+  exchanges = 0;
+  async createLinkToken(opts: any) {
     this.lastLinkOpts = opts;
-    return { link_token: 'link-sandbox-123', expiration: '2026-10-09T12:00:00Z' };
+    return { link_token: 'link-sandbox-123', expiration: '2026-10-09T12:00:00Z', hosted_link_url: opts.hostedLink ? 'https://hosted.plaid.com/link/abc' : undefined };
+  }
+  async getLinkToken() {
+    return this.linkGet;
   }
   async exchangePublicToken(publicToken: string) {
+    this.exchanges++;
     if (publicToken !== 'public-ok') throw new PlaidError(400, 'INVALID_PUBLIC_TOKEN', 'INVALID_INPUT', 'bad token');
     return { access_token: 'access-sandbox-SECRET-TOKEN', item_id: 'item_1' };
   }
@@ -50,26 +57,43 @@ class FakePlaid implements PlaidApi {
 }
 
 let dir: string;
+let db: ReturnType<typeof openNodeDatabase>;
 let store: Store;
 let plaid: FakePlaid;
 let clock: number;
 let app: ReturnType<typeof createApp>;
+let fetchLog: string[];
+const setupKey = newSetupKey();
+const config = { masterKey, countryCodes: ['US'], PLAID_ENV: 'sandbox' as const, BUDGI_SETUP_KEY: setupKey, PUBLIC_URL: 'https://budgi.example.workers.dev' };
 
-beforeEach(() => {
+const fakeFetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+  const url = String(input);
+  fetchLog.push(`${init?.method ?? 'GET'} ${url}`);
+  if (url.endsWith('/claim/DEMO')) return new Response('https://user:pass@beta-bridge.simplefin.org/simplefin');
+  if (url.startsWith('https://beta-bridge.simplefin.org/simplefin/accounts')) {
+    return Response.json({ errors: [], accounts: [{ id: 'A1', name: 'Checking', currency: 'USD', balance: '10.00', 'balance-date': 1, transactions: [] }] });
+  }
+  return new Response('nope', { status: 404 });
+}) as typeof fetch;
+
+beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'budgi-'));
-  store = new Store(join(dir, 'test.db'));
+  db = openNodeDatabase(join(dir, 'test.db'));
+  store = new Store(db);
+  await store.init();
   plaid = new FakePlaid();
   clock = 1_760_000_000_000;
-  app = createApp({ config: { masterKey, countryCodes: ['US'], PLAID_ENV: 'sandbox' }, store, plaid, now: () => clock });
+  fetchLog = [];
+  app = createApp({ config, store, plaid, now: () => clock, fetch: fakeFetch });
 });
 afterEach(() => {
-  store.close();
+  db.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
 async function pair(name = 'iPhone') {
   const code = newPairingCode();
-  store.createPairingCode(normalizePairingCode(code), 600_000, clock);
+  await store.createPairingCode(normalizePairingCode(code), 600_000, clock);
   const kp = keyPairFromSeed(randomBytes(32));
   const res = await app.request('/v1/pair', {
     method: 'POST',
@@ -101,7 +125,7 @@ describe('pairing', () => {
 
   it('rejects expired codes', async () => {
     const code = newPairingCode();
-    store.createPairingCode(normalizePairingCode(code), 1000, clock);
+    await store.createPairingCode(normalizePairingCode(code), 1000, clock);
     clock += 2000;
     const res = await app.request('/v1/pair', {
       method: 'POST',
@@ -155,7 +179,7 @@ describe('request signing', () => {
     const headersOld = signRequest(kp.secretKey, deviceId, { method: 'GET', path: '/v1/me', body: '' }, randomBytes(16), clock - 10 * 60_000);
     expect((await app.request('/v1/me', { headers: headersOld })).status).toBe(401);
 
-    store.revokeDevice(deviceId, clock);
+    await store.revokeDevice(deviceId, clock);
     expect((await signed(kp, deviceId, 'GET', '/v1/me')).status).toBe(401);
   });
 });
@@ -174,15 +198,15 @@ describe('plaid relay', () => {
     expect(exJson).toEqual({ itemId: 'item_1', institutionName: 'First Platypus Bank' });
     expect(JSON.stringify(exJson)).not.toContain('SECRET');
 
-    const row = store.getItem('item_1')!;
+    const row = (await store.getItem('item_1'))!;
     expect(row.access_token_enc).not.toContain('SECRET');
-    expect(new SecretBox(masterKey).open(row.access_token_enc, 'item:item_1')).toBe('access-sandbox-SECRET-TOKEN');
+    expect(await new SecretBox(masterKey).open(row.access_token_enc, 'item:item_1')).toBe('access-sandbox-SECRET-TOKEN');
     // Ciphertext is bound to its row.
-    expect(() => new SecretBox(masterKey).open(row.access_token_enc, 'item:other')).toThrow();
+    await expect(new SecretBox(masterKey).open(row.access_token_enc, 'item:other')).rejects.toThrow();
     // And to the master key.
-    expect(() => new SecretBox(randomBytes(32)).open(row.access_token_enc, 'item:item_1')).toThrow();
+    await expect(new SecretBox(randomBytes(32)).open(row.access_token_enc, 'item:item_1')).rejects.toThrow();
     // Nothing in the database file is plaintext.
-    store.db.exec('PRAGMA wal_checkpoint(FULL)');
+    db.raw.exec('PRAGMA wal_checkpoint(FULL)');
     expect(readFileSync(join(dir, 'test.db')).toString('latin1')).not.toContain('SECRET-TOKEN');
 
     const items = await (await signed(kp, deviceId, 'GET', '/v1/items')).json();
@@ -230,7 +254,7 @@ describe('plaid relay', () => {
     const relink = await signed(kp, deviceId, 'POST', '/v1/items/item_1/sync', { cursor: 'start' });
     expect(relink.status).toBe(409);
     expect(await relink.json()).toMatchObject({ error: 'ITEM_LOGIN_REQUIRED', needsRelink: true });
-    expect(store.getItem('item_1')?.error_code).toBe('ITEM_LOGIN_REQUIRED');
+    expect((await store.getItem('item_1'))?.error_code).toBe('ITEM_LOGIN_REQUIRED');
   });
 
   it('validates input and 404s unknown items', async () => {
@@ -248,7 +272,7 @@ describe('plaid relay', () => {
     await signed(kp, deviceId, 'POST', '/v1/link/exchange', { publicToken: 'public-ok' });
     expect((await signed(kp, deviceId, 'DELETE', '/v1/items/item_1')).status).toBe(200);
     expect(plaid.removed).toEqual(['access-sandbox-SECRET-TOKEN']);
-    expect(store.getItem('item_1')).toBeUndefined();
+    expect(await store.getItem('item_1')).toBeNull();
   });
 
   it('lists and revokes devices', async () => {
@@ -264,9 +288,9 @@ describe('plaid relay', () => {
 
 describe('without plaid configured', () => {
   it('explains what to do', async () => {
-    const bare = createApp({ config: { masterKey, countryCodes: ['US'], PLAID_ENV: 'sandbox' }, store, now: () => clock });
+    const bare = createApp({ config, store, now: () => clock });
     const code = newPairingCode();
-    store.createPairingCode(normalizePairingCode(code), 600_000, clock);
+    await store.createPairingCode(normalizePairingCode(code), 600_000, clock);
     const kp = keyPairFromSeed(randomBytes(32));
     const paired = (await (await bare.request('/v1/pair', { method: 'POST', body: JSON.stringify({ code, publicKey: base64UrlEncode(kp.publicKey), name: 'x' }) })).json()) as { deviceId: string; plaidEnabled: boolean };
     expect(paired.plaidEnabled).toBe(false);
@@ -274,5 +298,112 @@ describe('without plaid configured', () => {
     const res = await bare.request('/v1/link/token', { method: 'POST', headers, body: '{}' });
     expect(res.status).toBe(503);
     expect(await res.json()).toMatchObject({ error: 'PLAID_NOT_CONFIGURED' });
+  });
+});
+
+
+describe('first-device setup key', () => {
+  const pairWith = (code: string, a = app) =>
+    a.request('/v1/pair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, publicKey: base64UrlEncode(keyPairFromSeed(randomBytes(32)).publicKey), name: 'iPhone' }),
+    });
+
+  it('pairs the first device only, then stops working', async () => {
+    expect(await (await app.request('/v1/status')).json()).toMatchObject({ needsSetup: true, plaidEnabled: true });
+    expect((await pairWith('wrong-key-wrong-key')).status).toBe(401);
+    expect((await pairWith(setupKey.toLowerCase())).status).toBe(200);
+    expect(await (await app.request('/v1/status')).json()).toMatchObject({ needsSetup: false });
+    expect((await pairWith(setupKey)).status).toBe(401);
+  });
+
+  it('lets a paired device mint codes for more devices', async () => {
+    const { kp, deviceId } = await pair();
+    const res = (await (await signed(kp, deviceId, 'POST', '/v1/pairing-codes', {})).json()) as { code: string };
+    expect(res.code).toMatch(/^[0-9A-Z]{5}-[0-9A-Z]{5}$/);
+    expect((await pairWith(res.code)).status).toBe(200);
+    expect((await pairWith(res.code)).status).toBe(401);
+  });
+});
+
+describe('replay protection', () => {
+  it('holds across separate app instances (e.g. Worker isolates)', async () => {
+    const { kp, deviceId } = await pair();
+    const other = createApp({ config, store, plaid, now: () => clock });
+    const nonce = randomBytes(16);
+    const headers = signRequest(kp.secretKey, deviceId, { method: 'GET', path: '/v1/me', body: '' }, nonce, clock);
+    expect((await app.request('/v1/me', { headers })).status).toBe(200);
+    expect((await other.request('/v1/me', { headers })).status).toBe(401);
+  });
+});
+
+describe('Plaid Hosted Link', () => {
+  it('reads results from /link/token/get', () => {
+    expect(readLinkResults({ link_token: 'x', link_sessions: [] })).toEqual({ finished: false, exited: false, tokens: [] });
+    expect(
+      readLinkResults({
+        link_token: 'x',
+        link_sessions: [{ finished_at: 'now', results: { item_add_results: [{ public_token: 'p', institution: { name: 'Bank', institution_id: 'ins' } }] } }],
+      }).tokens,
+    ).toEqual([{ publicToken: 'p', institutionId: 'ins', institutionName: 'Bank' }]);
+    expect(readLinkResults({ link_token: 'x', link_sessions: [{ finished_at: 'now', exit: {} }] }).exited).toBe(true);
+  });
+
+  it('starts, polls, and finishes exactly once', async () => {
+    const { kp, deviceId } = await pair();
+    const start = (await (await signed(kp, deviceId, 'POST', '/v1/link/hosted', {})).json()) as { sessionId: string; url: string };
+    expect(start.url).toBe('https://hosted.plaid.com/link/abc');
+    expect(plaid.lastLinkOpts).toMatchObject({
+      hostedLink: { completionRedirectUri: 'https://budgi.example.workers.dev/connected.html' },
+      webhook: 'https://budgi.example.workers.dev/plaid/webhook',
+    });
+    // The link token is stored encrypted.
+    db.raw.exec('PRAGMA wal_checkpoint(FULL)');
+    expect(readFileSync(join(dir, 'test.db')).toString('latin1')).not.toContain('link-sandbox-123');
+
+    const poll = async () => (await signed(kp, deviceId, 'GET', `/v1/link/hosted/${start.sessionId}`)).json();
+    expect(await poll()).toEqual({ status: 'pending' });
+
+    plaid.linkGet = {
+      link_token: 'link-sandbox-123',
+      link_sessions: [{ finished_at: 'now', results: { item_add_results: [{ public_token: 'public-ok', institution: { name: 'Platypus', institution_id: 'ins_1' } }] } }],
+    };
+    // The webhook body is only a hint; it triggers a server-side fetch.
+    const hook = await app.request('/plaid/webhook', {
+      method: 'POST',
+      body: JSON.stringify({ webhook_type: 'LINK', webhook_code: 'SESSION_FINISHED', link_token: 'link-sandbox-123', public_tokens: ['forged'] }),
+    });
+    expect(hook.status).toBe(200);
+    expect(await poll()).toEqual({ status: 'done', items: [{ itemId: 'item_1', institutionName: 'Platypus' }] });
+    expect(await poll()).toEqual({ status: 'done', items: [{ itemId: 'item_1', institutionName: 'Platypus' }] });
+    expect(plaid.exchanges).toBe(1);
+    expect(await store.getItem('item_1')).not.toBeNull();
+  });
+
+  it('ignores webhooks for unknown link tokens', async () => {
+    const res = await app.request('/plaid/webhook', { method: 'POST', body: JSON.stringify({ webhook_type: 'LINK', webhook_code: 'SESSION_FINISHED', link_token: 'nope' }) });
+    expect(res.status).toBe(200);
+    expect(plaid.exchanges).toBe(0);
+  });
+});
+
+describe('SimpleFIN proxy', () => {
+  it('claims, stores encrypted, and fetches accounts', async () => {
+    const { kp, deviceId } = await pair();
+    const claim = (await (await signed(kp, deviceId, 'POST', '/v1/simplefin', { setupToken: btoa('https://beta-bridge.simplefin.org/simplefin/claim/DEMO') })).json()) as { connectionId: string };
+    expect(claim.connectionId).toMatch(/^sf_/);
+    db.raw.exec('PRAGMA wal_checkpoint(FULL)');
+    expect(readFileSync(join(dir, 'test.db')).toString('latin1')).not.toContain('user:pass');
+    const accounts = await (await signed(kp, deviceId, 'POST', `/v1/simplefin/${claim.connectionId}/accounts`, { startDate: 1_700_000_000_000 })).json();
+    expect(accounts).toMatchObject({ accounts: [{ id: 'A1' }] });
+    expect(fetchLog.at(-1)).toBe('GET https://beta-bridge.simplefin.org/simplefin/accounts?start-date=1700000000&pending=1');
+  });
+
+  it('refuses setup tokens that point anywhere but simplefin.org', async () => {
+    const { kp, deviceId } = await pair();
+    const res = await signed(kp, deviceId, 'POST', '/v1/simplefin', { setupToken: btoa('https://169.254.169.254/latest/meta-data') });
+    expect(res.status).toBe(400);
+    expect(fetchLog).toEqual([]);
   });
 });

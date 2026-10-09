@@ -79,7 +79,42 @@ export function syncAll(force = false): Promise<number> {
   return inflight;
 }
 
-/** Plaid: get a link token from the relay, open Link, exchange on the relay. */
+/**
+ * Web/PWA: Plaid Hosted Link. Start a session (the page opens Plaid in a
+ * browser tab from a tap), then poll until the relay has collected the result
+ * from Plaid. Works with OAuth banks because sign-in happens in real Safari.
+ */
+export function startHostedLink(relinkItemId?: string) {
+  return relay.linkHosted(relinkItemId);
+}
+
+export async function waitForHostedLink(sessionId: string, relinkItemId?: string, signal?: { cancelled: boolean }): Promise<Connection[] | null> {
+  const deadline = Date.now() + 20 * 60_000;
+  while (Date.now() < deadline && !signal?.cancelled) {
+    const res = await relay.linkHostedStatus(sessionId).catch(() => ({ status: 'pending' as const, items: undefined }));
+    if (res.status === 'exited') return null;
+    if (res.status === 'done') {
+      const store = useStore.getState();
+      const conns: Connection[] = [];
+      for (const item of res.items ?? []) {
+        if (item.itemId === relinkItemId) {
+          store.patchConnection(item.itemId, { needsRelink: false, error: undefined });
+          continue;
+        }
+        const existing = store.connections.find((c) => c.id === item.itemId);
+        const conn: Connection = existing ?? { id: item.itemId, provider: 'plaid', name: item.institutionName, cursor: null };
+        if (!existing) store.upsertConnection(conn);
+        conns.push(conn);
+      }
+      void syncAll(true);
+      return conns;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return null;
+}
+
+/** Native: get a link token from the relay, open the Link SDK, exchange on the relay. */
 export async function connectPlaid(relinkItemId?: string): Promise<Connection | null> {
   const { linkToken } = await relay.linkToken(relinkItemId);
   const result = await openPlaidLink(linkToken);

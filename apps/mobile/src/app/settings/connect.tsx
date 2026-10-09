@@ -1,7 +1,7 @@
 import { DEMO_CONNECTION } from '@budgi/core';
 import * as Clipboard from 'expo-clipboard';
-import { router } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { router, useFocusEffect } from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, TextInput, View } from 'react-native';
 import Animated, { FadeInDown, LinearTransition } from 'react-native-reanimated';
 import { Card } from '@/components/Card';
@@ -14,7 +14,7 @@ import { toast } from '@/components/Toast';
 import { haptic } from '@/lib/haptics';
 import { getRelayConfig } from '@/lib/relay';
 import { useStore, type Connection } from '@/lib/store';
-import { connectPlaid, connectSimpleFin, disconnect, syncAll } from '@/lib/sync';
+import { connectPlaid, connectSimpleFin, disconnect, startHostedLink, syncAll, waitForHostedLink } from '@/lib/sync';
 import { alpha, radius, useTheme } from '@/lib/theme';
 
 function timeAgo(iso?: string) {
@@ -36,10 +36,17 @@ export default function Connect() {
   const [busy, setBusy] = useState<string | null>(null);
   const [token, setToken] = useState('');
   const [showSimpleFin, setShowSimpleFin] = useState(false);
+  // Web: a Hosted Link session waiting for you to open Plaid.
+  const [hosted, setHosted] = useState<{ sessionId: string; url: string; relinkItemId?: string; opened?: boolean } | null>(null);
+  const cancelRef = useRef({ cancelled: false });
+  useEffect(() => () => void (cancelRef.current.cancelled = true), []);
 
-  useEffect(() => {
-    void getRelayConfig().then((c) => setPaired(!!c));
-  }, []);
+  // Re-check when returning from the pairing screen.
+  useFocusEffect(
+    useCallback(() => {
+      void getRelayConfig().then((c) => setPaired(!!c));
+    }, []),
+  );
 
   const run = async (key: string, fn: () => Promise<unknown>, success?: string) => {
     setBusy(key);
@@ -57,11 +64,33 @@ export default function Connect() {
     }
   };
 
-  const addPlaid = () => {
+  const addPlaid = (relinkItemId?: string) => {
     if (!paired) return router.push('/pair');
-    void run('plaid', async () => {
-      const conn = await connectPlaid();
-      if (conn) toast({ title: `${conn.name} connected`, message: 'Importing transactions…', icon: 'checkmark.circle.fill' });
+    if (Platform.OS === 'web') {
+      void run(relinkItemId ?? 'plaid', async () => setHosted({ ...(await startHostedLink(relinkItemId)), relinkItemId }));
+      return;
+    }
+    void run(relinkItemId ?? 'plaid', async () => {
+      const conn = await connectPlaid(relinkItemId);
+      if (conn) toast({ title: relinkItemId ? 'Reconnected' : `${conn.name} connected`, message: 'Importing transactions…', icon: 'checkmark.circle.fill' });
+    });
+  };
+
+  // Must run directly in the tap handler, or Safari blocks the new tab.
+  const openHosted = () => {
+    if (!hosted) return;
+    window.open(hosted.url, '_blank', 'noopener');
+    setHosted({ ...hosted, opened: true });
+    const session = hosted;
+    void waitForHostedLink(session.sessionId, session.relinkItemId, cancelRef.current).then((conns) => {
+      setHosted(null);
+      if (conns === null) return toast({ title: 'Plaid closed', message: 'No account was connected.', icon: 'info.circle' });
+      haptic.success();
+      toast({
+        title: session.relinkItemId ? 'Reconnected' : conns.length ? `${conns.map((c) => c.name).join(', ')} connected` : 'Connected',
+        message: 'Importing transactions…',
+        icon: 'checkmark.circle.fill',
+      });
     });
   };
 
@@ -89,7 +118,7 @@ export default function Connect() {
                 iconColor={c.error ? '#F59E0B' : c.provider === 'plaid' ? '#111827' : c.provider === 'simplefin' ? '#0EA5E9' : '#8B5CF6'}
                 title={c.name}
                 subtitle={c.needsRelink ? 'Sign-in required — tap to fix' : c.error ? c.error : `${n} account${n === 1 ? '' : 's'} · ${c.provider === 'demo' ? 'Sample data' : timeAgo(c.lastSyncAt)}`}
-                onPress={c.needsRelink ? () => void run(c.id, () => connectPlaid(c.id), 'Reconnected') : undefined}
+                onPress={c.needsRelink ? () => addPlaid(c.id) : undefined}
                 right={
                   busy === c.id ? (
                     <ActivityIndicator />
@@ -122,20 +151,61 @@ export default function Connect() {
       </Text>
 
       <Animated.View layout={LinearTransition} style={{ gap: 10 }}>
+        {hosted && (
+          <Animated.View entering={FadeInDown.springify().damping(18)}>
+            <Card style={{ gap: 12, borderColor: alpha(t.accent, 0.4) }}>
+              <Text variant="headline">{hosted.opened ? 'Waiting for Plaid…' : 'Ready to connect'}</Text>
+              <Text variant="footnote" tone="secondary">
+                {hosted.opened
+                  ? 'Finish signing in on the Plaid page, then come back here. This updates automatically.'
+                  : 'Plaid opens in a browser tab. Sign in to your bank there — Budgi never sees your password.'}
+              </Text>
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <PressableScale
+                  onPress={() => {
+                    cancelRef.current.cancelled = true;
+                    cancelRef.current = { cancelled: false };
+                    setHosted(null);
+                  }}
+                  style={{ flex: 1, height: 44, borderRadius: radius.pill, backgroundColor: t.surfacePressed, alignItems: 'center', justifyContent: 'center' }}>
+                  <Text variant="callout" weight="600">
+                    Cancel
+                  </Text>
+                </PressableScale>
+                <PressableScale onPress={openHosted} style={{ flex: 2, height: 44, borderRadius: radius.pill, backgroundColor: t.accent, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 }}>
+                  {hosted.opened && <ActivityIndicator color={t.onAccent} />}
+                  <Text variant="callout" tone="onAccent" weight="700">
+                    {hosted.opened ? 'Open Plaid again' : 'Continue to Plaid'}
+                  </Text>
+                </PressableScale>
+              </View>
+            </Card>
+          </Animated.View>
+        )}
         <Option
           icon="building.columns.fill"
           color="#22C55E"
           title="Bank or card via Plaid"
-          body={paired ? '12,000+ institutions. Sign in with your bank inside Plaid — Budgi never sees your password.' : 'Requires your private Budgi relay (one-time setup). Tap to pair.'}
-          badge={paired ? 'Relay connected' : 'Set up relay'}
+          body={
+            paired
+              ? '12,000+ institutions. Sign in with your bank inside Plaid — Budgi never sees your password.'
+              : Platform.OS === 'web'
+                ? 'First, pair this device with your Budgi server using your setup key (one time).'
+                : 'Requires your private Budgi relay (one-time setup). Tap to pair.'
+          }
+          badge={paired ? 'Ready' : Platform.OS === 'web' ? 'Pair device' : 'Set up relay'}
           busy={busy === 'plaid'}
-          onPress={addPlaid}
+          onPress={() => addPlaid()}
         />
         <Option
           icon="key.fill"
           color="#0EA5E9"
           title="SimpleFIN Bridge"
-          body="No server needed. Read-only access you control at beta-bridge.simplefin.org; paste a setup token."
+          body={
+            Platform.OS === 'web'
+              ? 'Read-only access you control at beta-bridge.simplefin.org (about $15/yr). Paste a setup token.'
+              : 'No server needed. Read-only access you control at beta-bridge.simplefin.org; paste a setup token.'
+          }
           onPress={() => setShowSimpleFin((v) => !v)}
         />
         {showSimpleFin && (
@@ -211,7 +281,9 @@ export default function Connect() {
       <View style={{ flexDirection: 'row', gap: 10, marginTop: 24, paddingHorizontal: 4 }}>
         <Icon name="lock.shield.fill" size={16} color={t.textTertiary} />
         <Text variant="footnote" tone="tertiary" style={{ flex: 1 }}>
-          Connections are read-only. Plaid access tokens are encrypted on your relay and never sent to this phone; SimpleFIN keys never leave the Keychain.
+          {Platform.OS === 'web'
+            ? 'Connections are read-only. Bank tokens are encrypted on your Budgi server and never sent to this device; your transactions are stored only on this device, encrypted.'
+            : 'Connections are read-only. Plaid access tokens are encrypted on your relay and never sent to this phone; SimpleFIN keys never leave the Keychain.'}
         </Text>
       </View>
     </Screen>

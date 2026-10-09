@@ -1,5 +1,7 @@
 import type { Account, Transaction } from '@budgi/core';
 import { base64UrlDecode, base64UrlEncode, keyFingerprint, keyPairFromSeed, signRequest } from '@budgi/core/auth';
+import { Platform } from 'react-native';
+import type { SimpleFinAccountSet } from '@budgi/core';
 import { randomBytes } from './random';
 import { deleteSecret, getSecret, SecretKeys, setSecret } from './secure';
 
@@ -46,6 +48,20 @@ async function deviceSeed(): Promise<Uint8Array> {
     await setSecret(SecretKeys.deviceSeed, seed);
   }
   return base64UrlDecode(seed);
+}
+
+/** The web app is served by the relay itself, so it talks to its own origin. */
+export const SAME_ORIGIN_RELAY = Platform.OS === 'web' && typeof window !== 'undefined' ? window.location.origin : undefined;
+
+/** Unauthenticated: does this relay still need its first device? */
+export async function relayStatus(url = SAME_ORIGIN_RELAY): Promise<{ needsSetup: boolean; plaidEnabled: boolean; plaidEnv: string; version: string } | null> {
+  if (!url) return null;
+  try {
+    const res = await fetch(`${url.replace(/\/$/, '')}/v1/status`);
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function getRelayConfig(): Promise<RelayConfig | null> {
@@ -119,6 +135,17 @@ export interface RelaySyncResponse {
 }
 
 export const relay = {
+  pairingCode: () => relayRequest<{ code: string; expiresAt: number }>('POST', '/v1/pairing-codes', {}),
+  linkHosted: (itemId?: string) => relayRequest<{ sessionId: string; url: string }>('POST', '/v1/link/hosted', itemId ? { itemId } : {}),
+  linkHostedStatus: (sessionId: string) =>
+    relayRequest<{ status: 'pending' | 'done' | 'exited'; items?: Array<{ itemId: string; institutionName: string }> }>(
+      'GET',
+      `/v1/link/hosted/${encodeURIComponent(sessionId)}`,
+    ),
+  simplefinClaim: (setupToken: string) => relayRequest<{ connectionId: string }>('POST', '/v1/simplefin', { setupToken }),
+  simplefinAccounts: (id: string, start: Date) =>
+    relayRequest<SimpleFinAccountSet>('POST', `/v1/simplefin/${encodeURIComponent(id)}/accounts`, { startDate: start.getTime() }),
+  simplefinRemove: (id: string) => relayRequest<{ ok: true }>('DELETE', `/v1/simplefin/${encodeURIComponent(id)}`),
   me: () => relayRequest<{ deviceId: string; name: string; plaidEnabled: boolean; plaidEnv: string; version: string }>('GET', '/v1/me'),
   linkToken: (itemId?: string) => relayRequest<{ linkToken: string }>('POST', '/v1/link/token', itemId ? { itemId } : {}),
   exchange: (publicToken: string, institutionId?: string, institutionName?: string) =>

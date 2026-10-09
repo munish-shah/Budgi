@@ -11,7 +11,8 @@
     "pair": "tsx --env-file-if-exists=.env src/cli.ts pair",
     "cli": "tsx --env-file-if-exists=.env src/cli.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dev:cloud": "wrangler dev --local --port 8788"
   },
   "dependencies": {
     "@budgi/core": "*",
@@ -26,6 +27,7 @@
     "esbuild": "^0.28.2",
     "tsx": "^4.23.15",
     "typescript": "~6.0.3",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.3",
+    "wrangler": "^4.149.0"
   }
 }

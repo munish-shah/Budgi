@@ -28,6 +28,24 @@ export interface LinkTokenOptions {
   accessToken?: string;
   redirectUri?: string;
   countryCodes: string[];
+  /** Use Plaid Hosted Link: the whole flow runs on a Plaid page in a browser tab. */
+  hostedLink?: { completionRedirectUri?: string };
+  webhook?: string;
+}
+
+/** Subset of /link/token/get used to collect Hosted Link results. */
+export interface LinkTokenGetResponse {
+  link_token: string;
+  link_sessions?: Array<{
+    link_session_id?: string;
+    finished_at?: string | null;
+    results?: {
+      item_add_results?: Array<{ public_token: string; institution?: { name?: string; institution_id?: string } | null }>;
+    } | null;
+    on_success?: { public_token?: string; metadata?: { institution?: { name?: string; institution_id?: string } | null } } | null;
+    exit?: unknown;
+    on_exit?: unknown;
+  }>;
 }
 
 export interface SyncPage {
@@ -41,7 +59,8 @@ export interface SyncPage {
 }
 
 export interface PlaidApi {
-  createLinkToken(opts: LinkTokenOptions): Promise<{ link_token: string; expiration: string }>;
+  createLinkToken(opts: LinkTokenOptions): Promise<{ link_token: string; expiration: string; hosted_link_url?: string }>;
+  getLinkToken(linkToken: string): Promise<LinkTokenGetResponse>;
   exchangePublicToken(publicToken: string): Promise<{ access_token: string; item_id: string }>;
   transactionsSync(accessToken: string, cursor: string | undefined): Promise<SyncPage>;
   removeItem(accessToken: string): Promise<void>;
@@ -79,7 +98,7 @@ export class PlaidClient implements PlaidApi {
   }
 
   createLinkToken(opts: LinkTokenOptions) {
-    return this.#post<{ link_token: string; expiration: string }>('/link/token/create', {
+    return this.#post<{ link_token: string; expiration: string; hosted_link_url?: string }>('/link/token/create', {
       client_name: 'Budgi',
       language: 'en',
       country_codes: opts.countryCodes,
@@ -87,8 +106,16 @@ export class PlaidClient implements PlaidApi {
       ...(opts.accessToken
         ? { access_token: opts.accessToken }
         : { products: ['transactions'], transactions: { days_requested: 730 } }),
-      ...(opts.redirectUri ? { redirect_uri: opts.redirectUri } : {}),
+      ...(opts.redirectUri && !opts.hostedLink ? { redirect_uri: opts.redirectUri } : {}),
+      ...(opts.hostedLink
+        ? { hosted_link: opts.hostedLink.completionRedirectUri ? { completion_redirect_uri: opts.hostedLink.completionRedirectUri } : {} }
+        : {}),
+      ...(opts.webhook ? { webhook: opts.webhook } : {}),
     });
+  }
+
+  getLinkToken(linkToken: string) {
+    return this.#post<LinkTokenGetResponse>('/link/token/get', { link_token: linkToken });
   }
 
   exchangePublicToken(publicToken: string) {

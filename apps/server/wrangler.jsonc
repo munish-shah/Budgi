@@ -1,0 +1,18 @@
+// Cloudflare Workers config. `npm run deploy` (repo root) creates the D1
+// database and writes wrangler.deploy.jsonc with its id; this file is used
+// as-is for local development (`npm run dev:cloud -w @budgi/server`).
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "budgi",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "assets": {
+    "directory": "../mobile/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/v1/*", "/plaid/*", "/health"]
+  },
+  "d1_databases": [{ "binding": "DB", "database_name": "budgi", "database_id": "00000000-0000-0000-0000-000000000000" }],
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

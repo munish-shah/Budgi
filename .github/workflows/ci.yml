@@ -19,8 +19,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - name: Bundle the app (web preview build)
-        run: npx expo export --platform web
-        working-directory: apps/mobile
-        env:
-          CI: 1
+      - name: Build the installable web app
+        run: npm run build:pwa -w @budgi/mobile
+      - name: Bundle the Cloudflare Worker (dry run)
+        run: npx wrangler deploy --dry-run --outdir /tmp/worker
+        working-directory: apps/server

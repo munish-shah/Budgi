@@ -12,7 +12,8 @@
     "typecheck": "npm run typecheck -w @budgi/core -w @budgi/server -w @budgi/mobile",
     "server": "npm run dev -w @budgi/server",
     "server:pair": "npm run pair -w @budgi/server",
-    "mobile": "npm run start -w @budgi/mobile"
+    "mobile": "npm run start -w @budgi/mobile",
+    "deploy": "node scripts/deploy.mjs"
   },
   "engines": {
     "node": ">=22.13"

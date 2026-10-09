@@ -134,3 +134,39 @@ export function keyFingerprint(publicKey: Uint8Array): string {
   const hex = sha256Hex(publicKey).slice(0, 16).toUpperCase();
   return hex.match(/.{4}/g)!.join('-');
 }
+
+/**
+ * Same as verifyRequestSignature, but uses the platform's native Ed25519
+ * (WebCrypto in Cloudflare Workers, Node 22, Safari 17+) when available.
+ * Native verification keeps edge CPU time well under free-tier limits;
+ * the pure-JS path is the fallback.
+ */
+export async function verifyRequestSignatureAsync(
+  publicKey: Uint8Array,
+  input: CanonicalRequestInput,
+  signatureB64: string,
+): Promise<boolean> {
+  let sig: Uint8Array;
+  try {
+    sig = base64UrlDecode(signatureB64);
+  } catch {
+    return false;
+  }
+  if (sig.length !== 64 || publicKey.length !== 32) return false;
+  const subtle = (globalThis as { crypto?: { subtle?: SubtleLike } }).crypto?.subtle;
+  if (subtle) {
+    let key: unknown;
+    try {
+      key = await subtle.importKey('raw', publicKey, { name: 'Ed25519' }, false, ['verify']);
+    } catch {
+      key = undefined; // runtime without native Ed25519
+    }
+    if (key) return subtle.verify({ name: 'Ed25519' }, key, sig, utf8ToBytes(canonicalRequest(input)));
+  }
+  return verifyRequestSignature(publicKey, input, signatureB64);
+}
+
+interface SubtleLike {
+  importKey(format: 'raw', keyData: Uint8Array, algorithm: { name: string }, extractable: boolean, usages: string[]): Promise<unknown>;
+  verify(algorithm: { name: string }, key: unknown, signature: Uint8Array, data: Uint8Array): Promise<boolean>;
+}

@@ -1,8 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import qrcode from 'qrcode-terminal';
 import { loadConfig } from './config';
-import { newPairingCode, normalizePairingCode } from './crypto';
-import { Store } from './db';
+import { newPairingCode, newSetupKey, normalizePairingCode } from './crypto';
+import { openNodeDatabase } from './node-sqlite';
+import { Store } from './store';
 
 const PAIRING_TTL_MS = 10 * 60 * 1000;
 const [command, ...args] = process.argv.slice(2);
@@ -11,6 +12,7 @@ function usage() {
   console.log(`Budgi relay CLI
 
   keygen              Print a new random BUDGI_MASTER_KEY
+  setupkey            Print a new random BUDGI_SETUP_KEY
   pair                Create a one-time code (valid 10 min) to pair a device
   devices             List paired devices
   revoke <deviceId>   Revoke a device immediately
@@ -23,18 +25,25 @@ if (command === 'keygen') {
   process.exit(0);
 }
 
+if (command === 'setupkey') {
+  console.log(newSetupKey());
+  process.exit(0);
+}
+
 if (!command || command === 'help' || command === '--help') {
   usage();
   process.exit(0);
 }
 
-const config = loadConfig();
-const store = new Store(config.DATABASE_PATH);
+const config = loadConfig(process.env);
+const db = openNodeDatabase(config.DATABASE_PATH);
+const store = new Store(db);
+await store.init();
 
 switch (command) {
   case 'pair': {
     const code = newPairingCode();
-    store.createPairingCode(normalizePairingCode(code), PAIRING_TTL_MS);
+    await store.createPairingCode(normalizePairingCode(code), PAIRING_TTL_MS);
     const url = config.PUBLIC_URL ?? `http://${config.HOST}:${config.PORT}`;
     const deepLink = `budgi://pair?u=${encodeURIComponent(url)}&c=${code}`;
     console.log('\nScan with the Budgi app (Settings → Connect relay server), or enter manually:\n');
@@ -48,7 +57,7 @@ switch (command) {
     break;
   }
   case 'devices': {
-    const rows = store.listDevices();
+    const rows = await store.listDevices();
     if (!rows.length) console.log('No devices paired yet. Run: npm run pair');
     for (const d of rows) {
       const status = d.revoked_at ? 'revoked' : 'active';
@@ -63,11 +72,11 @@ switch (command) {
       usage();
       process.exit(1);
     }
-    console.log(store.revokeDevice(id) ? `Revoked ${id}` : `No active device ${id}`);
+    console.log((await store.revokeDevice(id)) ? `Revoked ${id}` : `No active device ${id}`);
     break;
   }
   case 'items': {
-    for (const i of store.listItems()) {
+    for (const i of await store.listItems()) {
       console.log(`${i.id}  ${(i.institution_name ?? 'Bank').padEnd(24)} ${i.error_code ?? 'ok'}`);
     }
     break;
@@ -76,4 +85,4 @@ switch (command) {
     usage();
     process.exit(1);
 }
-store.close();
+db.close();

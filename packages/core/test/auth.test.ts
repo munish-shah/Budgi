@@ -24,3 +24,16 @@ describe('auth', () => {
     expect(keyFingerprint(kp.publicKey)).toMatch(/^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/);
   });
 });
+
+describe('verifyRequestSignatureAsync', () => {
+  it('agrees with the pure-JS verifier', async () => {
+    const { verifyRequestSignatureAsync } = await import('../src/auth');
+    const kp = keyPairFromSeed(new Uint8Array(32).fill(3));
+    const req = { method: 'GET', path: '/v1/me', body: '' };
+    const h = signRequest(kp.secretKey, 'd', req, new Uint8Array(16).fill(9), 1_700_000_000_000);
+    const input = { ...req, timestamp: h[HEADER_TIMESTAMP], nonce: h[HEADER_NONCE] };
+    expect(await verifyRequestSignatureAsync(kp.publicKey, input, h[HEADER_SIGNATURE])).toBe(true);
+    expect(await verifyRequestSignatureAsync(kp.publicKey, { ...input, path: '/v1/x' }, h[HEADER_SIGNATURE])).toBe(false);
+    expect(await verifyRequestSignatureAsync(kp.publicKey, input, 'AAAA')).toBe(false);
+  });
+});

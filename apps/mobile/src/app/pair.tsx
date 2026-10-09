@@ -11,7 +11,7 @@ import { PressableScale } from '@/components/PressableScale';
 import { Text } from '@/components/Text';
 import { toast, ToastHost } from '@/components/Toast';
 import { haptic } from '@/lib/haptics';
-import { deviceFingerprint, forgetRelay, getRelayConfig, pairWithRelay, relay, type RelayConfig } from '@/lib/relay';
+import { deviceFingerprint, forgetRelay, getRelayConfig, pairWithRelay, relay, relayStatus, SAME_ORIGIN_RELAY, type RelayConfig } from '@/lib/relay';
 import { alpha, fonts, radius, useTheme } from '@/lib/theme';
 
 type Device = Awaited<ReturnType<typeof relay.devices>>['devices'][number];
@@ -28,7 +28,7 @@ export default function Pair() {
   const t = useTheme();
   const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{ u?: string; c?: string }>();
-  const [url, setUrl] = useState(params.u ?? '');
+  const [url, setUrl] = useState(params.u ?? SAME_ORIGIN_RELAY ?? '');
   const [code, setCode] = useState(params.c ?? '');
   const [busy, setBusy] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -37,11 +37,17 @@ export default function Pair() {
   const [fingerprint, setFingerprint] = useState('');
   const [devices, setDevices] = useState<Device[] | null>(null);
   const [status, setStatus] = useState<string>();
+  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
+  const [newCode, setNewCode] = useState<{ code: string; expiresAt: number } | null>(null);
+  const isWeb = Platform.OS === 'web';
 
   const refresh = async () => {
     const c = await getRelayConfig();
     setConfig(c);
-    if (!c) return;
+    if (!c) {
+      if (SAME_ORIGIN_RELAY) setNeedsSetup((await relayStatus())?.needsSetup ?? null);
+      return;
+    }
     setFingerprint(await deviceFingerprint());
     try {
       const me = await relay.me();
@@ -59,10 +65,10 @@ export default function Pair() {
   const pair = async (u = url, c = code) => {
     setBusy(true);
     try {
-      const name = `${Constants.deviceName ?? (Platform.OS === 'ios' ? 'iPhone' : 'Device')}`;
+      const name = isWeb ? webDeviceName() : `${Constants.deviceName ?? (Platform.OS === 'ios' ? 'iPhone' : 'Device')}`;
       await pairWithRelay(u, c, name);
       haptic.success();
-      toast({ title: 'Relay connected', message: 'You can now link banks through Plaid.', icon: 'checkmark.circle.fill' });
+      toast({ title: isWeb ? 'Device paired' : 'Relay connected', message: 'You can now link banks through Plaid.', icon: 'checkmark.circle.fill' });
       setCode('');
       await refresh();
     } catch (e) {
@@ -102,7 +108,7 @@ export default function Pair() {
       <Stack.Screen
         options={{
           headerShown: true,
-          title: 'Relay server',
+          title: isWeb ? 'Budgi server' : 'Relay server',
           headerStyle: { backgroundColor: t.bg },
           headerTitleStyle: { color: t.text },
           headerShadowVisible: false,
@@ -151,12 +157,18 @@ export default function Pair() {
                 <View style={{ width: 64, height: 64, borderRadius: 20, backgroundColor: alpha(t.accent, 0.15), alignItems: 'center', justifyContent: 'center' }}>
                   <Icon name="checkmark.shield.fill" size={30} color={t.accent} fallback="✓" />
                 </View>
-                <Text variant="title3">{config.url.replace(/^https?:\/\//, '')}</Text>
+                <Text variant="title3">{isWeb ? 'This device is paired' : config.url.replace(/^https?:\/\//, '')}</Text>
                 <Text variant="footnote" tone="secondary" align="center">
                   {status ?? 'Checking…'}
                 </Text>
               </View>
-              <ListGroup title="This device" footer="Every request is signed with a key stored in this phone’s Keychain. Compare this fingerprint with `npm run cli devices` on the server.">
+              <ListGroup
+                title="This device"
+                footer={
+                  isWeb
+                    ? 'Every request is signed with a key that never leaves this device (stored encrypted). Your server only knows its public half.'
+                    : 'Every request is signed with a key stored in this phone’s Keychain. Compare this fingerprint with `npm run cli devices` on the server.'
+                }>
                 <ListRow icon="key.fill" iconColor="#6366F1" title="Key fingerprint" right={<Text variant="footnote" tone="secondary" style={{ fontFamily: fonts.mono }}>{fingerprint}</Text>} chevron={false} />
               </ListGroup>
               {devices && (
@@ -187,11 +199,60 @@ export default function Pair() {
                   ))}
                 </ListGroup>
               )}
+              <ListGroup title="Add another device" footer="Open Budgi on your other device (for example your Mac at this site's address), choose pair, and enter this code. It works once and expires in 10 minutes.">
+                {newCode ? (
+                  <ListRow icon="key.fill" iconColor="#22C55E" title={newCode.code} subtitle={`Expires ${new Date(newCode.expiresAt).toLocaleTimeString()}`} chevron={false} />
+                ) : (
+                  <ListRow
+                    icon="plus"
+                    iconColor="#22C55E"
+                    title="Create a pairing code"
+                    onPress={async () => {
+                      try {
+                        setNewCode(await relay.pairingCode());
+                        haptic.success();
+                      } catch (e) {
+                        toast({ title: 'Couldn’t create a code', message: e instanceof Error ? e.message : String(e), icon: 'exclamationmark.triangle.fill' });
+                      }
+                    }}
+                  />
+                )}
+              </ListGroup>
               <ListGroup>
                 <ListRow title="Disconnect this device" destructive onPress={forget} chevron={false} />
               </ListGroup>
             </Animated.View>
           ) : (
+            isWeb ? (
+              <Animated.View entering={FadeInDown.springify().damping(18)} style={{ gap: 12 }}>
+                <Text variant="title3" style={{ marginTop: 8 }}>
+                  {needsSetup === false ? 'Pair this device' : 'Pair your first device'}
+                </Text>
+                <Text variant="footnote" tone="secondary">
+                  {needsSetup === false
+                    ? 'On a device that’s already paired, open Settings → Budgi server → Create a pairing code, and enter it here.'
+                    : 'Enter the setup key printed when you deployed Budgi. It only works once — for your first device.'}
+                </Text>
+                <TextInput
+                  value={code}
+                  onChangeText={setCode}
+                  placeholder={needsSetup === false ? 'Pairing code (XXXXX-XXXXX)' : 'Setup key'}
+                  placeholderTextColor={t.textTertiary}
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  style={[input, { fontFamily: fonts.mono }]}
+                />
+                <PressableScale
+                  disabled={!code || busy}
+                  onPress={() => void pair(SAME_ORIGIN_RELAY, code)}
+                  style={{ height: 50, borderRadius: radius.pill, backgroundColor: t.accent, alignItems: 'center', justifyContent: 'center', opacity: code ? 1 : 0.5 }}>
+                  {busy ? <ActivityIndicator color={t.onAccent} /> : <Text variant="headline" tone="onAccent">Pair this device</Text>}
+                </PressableScale>
+                <Text variant="caption" tone="tertiary">
+                  Pairing creates a signing key that never leaves this device. Your server only accepts requests signed with it.
+                </Text>
+              </Animated.View>
+            ) : (
             <Animated.View entering={FadeInDown.springify().damping(18)} style={{ gap: 12 }}>
               <Text variant="title3" style={{ marginTop: 8 }}>
                 Connect your private relay
@@ -227,13 +288,22 @@ export default function Pair() {
                 {busy ? <ActivityIndicator /> : <Text variant="headline">Pair this device</Text>}
               </PressableScale>
               <Text variant="caption" tone="tertiary">
-                Tip: Tailscale gives your relay a private HTTPS address that only your devices can reach — no ports opened to the internet.
+                Tip: deploy Budgi to Cloudflare’s free tier (`npm run deploy`) and use that address — nothing to keep running yourself.
               </Text>
             </Animated.View>
+            )
           )}
         </ScrollView>
       )}
       <ToastHost inModal />
     </View>
   );
+}
+
+function webDeviceName(): string {
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+  if (/iPhone/.test(ua)) return 'iPhone (web app)';
+  if (/iPad/.test(ua)) return 'iPad (web app)';
+  if (/Mac/.test(ua)) return 'Mac (web app)';
+  return 'Browser';
 }
