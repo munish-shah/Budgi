@@ -29,6 +29,40 @@ const step = (s) => console.log(`\n${bold('›')} ${s}`);
 
 // Set once we know which Cloudflare account to use; passed to every wrangler call.
 let accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+let userEmail = '';
+const CF_API = process.env.CF_API_BASE ?? 'https://api.cloudflare.com/client/v4';
+
+async function cfApi(method, path, body) {
+  const auth = wranglerJson(['auth', 'token', '--json'], 'read your Cloudflare login');
+  const res = await fetch(`${CF_API}${path}`, {
+    method,
+    headers: { Authorization: `Bearer ${auth.token}`, 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const json = await res.json().catch(() => ({}));
+  return { ok: res.ok && json.success !== false, result: json.result, code: json.errors?.[0]?.code, message: json.errors?.[0]?.message };
+}
+
+/**
+ * New Cloudflare accounts have no workers.dev subdomain until someone picks
+ * one, and wrangler only asks interactively. Claim one automatically so the
+ * deploy needs no clicks: your email's name first, then fallbacks.
+ */
+async function ensureWorkersSubdomain() {
+  const current = await cfApi('GET', `/accounts/${accountId}/workers/subdomain`);
+  if (current.ok && current.result?.subdomain) return current.result.subdomain;
+  const base = (userEmail.split('@')[0] || 'budgi').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'budgi';
+  const candidates = [base, `${base}-budgi`, `budgi-${randomBytes(3).toString('hex')}`, `budgi-${randomBytes(5).toString('hex')}`];
+  for (const name of candidates) {
+    const put = await cfApi('PUT', `/accounts/${accountId}/workers/subdomain`, { subdomain: name });
+    if (put.ok) {
+      console.log(dim(`Claimed your free subdomain: ${name}.workers.dev`));
+      return put.result?.subdomain ?? name;
+    }
+    if (put.code !== 10031) throw new Error(`Couldn't set up your workers.dev subdomain: ${put.message ?? 'unknown error'} (code ${put.code ?? '?'})`);
+  }
+  throw new Error('Couldn’t find a free workers.dev subdomain name. Pick one at dash.cloudflare.com → Workers & Pages, then re-run.');
+}
 
 function wrangler(args, { input, inherit = false } = {}) {
   const [cmd, ...pre] = process.env.WRANGLER_BIN ? [process.env.WRANGLER_BIN] : ['npx', 'wrangler'];
@@ -114,6 +148,7 @@ async function chooseAccount() {
     if (!who.ok) throw new Error(`Still not logged in. Wrangler said:\n\n${who.out.trim()}`);
   }
   const user = parseJson(who.stdout);
+  userEmail = user.email ?? '';
   const accounts = (user.accounts ?? []).filter((a) => a && a.id);
   console.log(dim(`Logged in${user.email ? ` as ${user.email}` : ''}.`));
   if (accountId) return;
@@ -162,10 +197,11 @@ async function main() {
   console.log(dim(`D1 database: ${db.uuid}`));
 
   step('Deploying');
+  const subdomain = await ensureWorkersSubdomain();
   const deployed = wrangler(['deploy', '--config', deployConfig]);
   console.log(dim(deployed.out.trim().split('\n').slice(-6).join('\n')));
   if (!deployed.ok) throw new Error(`Deploy failed. Wrangler said:\n\n${deployed.out.trim()}\n${hintFor(deployed.out)}`);
-  const url = deployed.out.match(/https:\/\/[a-z0-9.-]+\.workers\.dev/i)?.[0];
+  const url = deployed.out.match(/https:\/\/[a-z0-9.-]+\.workers\.dev/i)?.[0] ?? `https://${base.name}.${subdomain}.workers.dev`;
 
   step('Setting secrets (encrypted by Cloudflare, never in this repo)');
   const existing = new Set(wranglerJson(['secret', 'list', '--config', deployConfig], 'list the Worker’s secrets').map((s) => s.name));
@@ -215,7 +251,8 @@ async function main() {
   } else {
     console.log(dim('\n  (Your setup key was created on the first deploy. Lost it before pairing? Run: npm run deploy -- --new-setup-key)'));
   }
-  console.log(dim('\nTo update later: git pull && npm run deploy\n'));
+  console.log(dim('\nA brand-new address can take a minute or two to start working.'));
+  console.log(dim('To update later: git pull && npm run deploy\n'));
 }
 
 main().catch((e) => {
