@@ -27,15 +27,30 @@ const green = (s) => `\x1b[32m${s}\x1b[0m`;
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;
 const step = (s) => console.log(`\n${bold('›')} ${s}`);
 
+// Set once we know which Cloudflare account to use; passed to every wrangler call.
+let accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
+
 function wrangler(args, { input, inherit = false } = {}) {
-  const res = spawnSync('npx', ['wrangler', ...args], {
+  const [cmd, ...pre] = process.env.WRANGLER_BIN ? [process.env.WRANGLER_BIN] : ['npx', 'wrangler'];
+  const res = spawnSync(cmd, [...pre, ...args], {
     cwd: serverDir,
     encoding: 'utf8',
     input,
     stdio: inherit ? 'inherit' : ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, WRANGLER_SEND_METRICS: 'false' },
+    env: { ...process.env, WRANGLER_SEND_METRICS: 'false', ...(accountId ? { CLOUDFLARE_ACCOUNT_ID: accountId } : {}) },
   });
   return { ok: res.status === 0, out: `${res.stdout ?? ''}${res.stderr ?? ''}`, stdout: res.stdout ?? '' };
+}
+
+/** Run a wrangler command that prints JSON; on any failure, show wrangler's own output. */
+function wranglerJson(args, what) {
+  const res = wrangler(args);
+  try {
+    if (!res.ok) throw new Error();
+    return parseJson(res.stdout);
+  } catch {
+    throw new Error(`Couldn't ${what}. Wrangler said:\n\n${res.out.trim() || '(no output)'}\n`);
+  }
 }
 
 function run(cmd, args, cwd = root) {
@@ -60,24 +75,56 @@ const SETUP_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const newSetupKey = () => Array.from(randomBytes(20), (b) => SETUP_ALPHABET[b & 31]).join('').match(/.{5}/g).join('-');
 
 function parseJson(text) {
-  const start = text.indexOf('[') >= 0 && (text.indexOf('{') < 0 || text.indexOf('[') < text.indexOf('{')) ? text.indexOf('[') : text.indexOf('{');
-  return JSON.parse(text.slice(start));
+  const starts = [text.indexOf('['), text.indexOf('{')].filter((i) => i >= 0);
+  if (!starts.length) throw new Error('no JSON in output');
+  return JSON.parse(text.slice(Math.min(...starts)));
+}
+
+async function chooseAccount() {
+  let who = wrangler(['whoami', '--json']);
+  if (!who.ok) {
+    if (process.env.CLOUDFLARE_API_TOKEN) throw new Error(`CLOUDFLARE_API_TOKEN was rejected. Wrangler said:\n\n${who.out.trim()}`);
+    if (!interactive) throw new Error('Not logged in to Cloudflare. Run `npx wrangler login` first, or set CLOUDFLARE_API_TOKEN.');
+    console.log('A browser window will open to log in to Cloudflare (a free account is enough).');
+    if (!wrangler(['login'], { inherit: true }).ok) throw new Error('Cloudflare login failed.');
+    who = wrangler(['whoami', '--json']);
+    if (!who.ok) throw new Error(`Still not logged in. Wrangler said:\n\n${who.out.trim()}`);
+  }
+  const user = parseJson(who.stdout);
+  const accounts = (user.accounts ?? []).filter((a) => a && a.id);
+  console.log(dim(`Logged in${user.email ? ` as ${user.email}` : ''}.`));
+  if (accountId) return;
+  if (accounts.length === 1) {
+    accountId = accounts[0].id;
+    return;
+  }
+  if (!accounts.length) throw new Error('This Cloudflare login has no accounts. Create one at dash.cloudflare.com, then re-run.');
+  if (!interactive) {
+    throw new Error(`Your login has ${accounts.length} Cloudflare accounts. Set CLOUDFLARE_ACCOUNT_ID to one of:\n${accounts.map((a) => `  ${a.id}  ${a.name}`).join('\n')}`);
+  }
+  console.log('\nYour login has access to several Cloudflare accounts:');
+  accounts.forEach((a, i) => console.log(`  ${i + 1}. ${a.name} ${dim(a.id)}`));
+  for (;;) {
+    const pick = Number(await ask(`Which one should Budgi use? [1-${accounts.length}]: `));
+    if (Number.isInteger(pick) && pick >= 1 && pick <= accounts.length) {
+      accountId = accounts[pick - 1].id;
+      console.log(dim(`Tip: next time run with CLOUDFLARE_ACCOUNT_ID=${accountId} to skip this question.`));
+      return;
+    }
+  }
 }
 
 async function main() {
   console.log(bold('\nBudgi → Cloudflare (free tier)\n'));
 
   step('Checking your Cloudflare login');
-  if (!process.env.CLOUDFLARE_API_TOKEN && /not authenticated|You are not/i.test(wrangler(['whoami']).out)) {
-    console.log('A browser window will open to log in to Cloudflare (a free account is enough).');
-    if (!wrangler(['login'], { inherit: true }).ok) throw new Error('Cloudflare login failed.');
-  }
+  await chooseAccount();
 
   step('Building the web app');
-  run('npm', ['run', 'build:pwa', '-w', '@budgi/mobile']);
+  if (!process.env.SKIP_BUILD) run('npm', ['run', 'build:pwa', '-w', '@budgi/mobile']);
 
   step('Preparing the database');
-  const findDb = () => parseJson(wrangler(['d1', 'list', '--json']).stdout).find((d) => d.name === 'budgi');
+  const findDb = () => wranglerJson(['d1', 'list', '--json'], 'list your D1 databases').find((d) => d.name === 'budgi');
   let db = findDb();
   if (!db) {
     const created = wrangler(['d1', 'create', 'budgi']);
@@ -87,18 +134,18 @@ async function main() {
   if (!db?.uuid) throw new Error('Could not find the D1 database id.');
   const base = JSON.parse(readFileSync(join(serverDir, 'wrangler.jsonc'), 'utf8').replace(/^\s*\/\/.*$/gm, ''));
   base.d1_databases[0].database_id = db.uuid;
+  base.account_id = accountId;
   writeFileSync(join(serverDir, deployConfig), JSON.stringify(base, null, 2));
   console.log(dim(`D1 database: ${db.uuid}`));
 
   step('Deploying');
   const deployed = wrangler(['deploy', '--config', deployConfig]);
   console.log(dim(deployed.out.trim().split('\n').slice(-6).join('\n')));
-  if (!deployed.ok) throw new Error('Deploy failed (see output above).');
+  if (!deployed.ok) throw new Error(`Deploy failed. Wrangler said:\n\n${deployed.out.trim()}`);
   const url = deployed.out.match(/https:\/\/[a-z0-9.-]+\.workers\.dev/i)?.[0];
 
   step('Setting secrets (encrypted by Cloudflare, never in this repo)');
-  const list = wrangler(['secret', 'list', '--config', deployConfig]);
-  const existing = new Set(list.ok ? parseJson(list.stdout).map((s) => s.name) : []);
+  const existing = new Set(wranglerJson(['secret', 'list', '--config', deployConfig], 'list the Worker’s secrets').map((s) => s.name));
   const put = (name, value) => {
     const res = wrangler(['secret', 'put', name, '--config', deployConfig], { input: value });
     if (!res.ok) throw new Error(`Could not set ${name}:\n${res.out}`);
