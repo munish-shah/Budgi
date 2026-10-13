@@ -49,7 +49,7 @@ function wranglerJson(args, what) {
     if (!res.ok) throw new Error();
     return parseJson(res.stdout);
   } catch {
-    throw new Error(`Couldn't ${what}. Wrangler said:\n\n${res.out.trim() || '(no output)'}\n`);
+    throw new Error(`Couldn't ${what}. Wrangler said:\n\n${res.out.trim() || '(no output)'}\n${hintFor(res.out)}`);
   }
 }
 
@@ -73,6 +73,29 @@ function ask(question, { hidden = false } = {}) {
 
 const SETUP_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const newSetupKey = () => Array.from(randomBytes(20), (b) => SETUP_ALPHABET[b & 31]).join('').match(/.{5}/g).join('-');
+
+/** Plain-English next steps for Cloudflare errors that new accounts commonly hit. */
+function hintFor(output) {
+  if (/code: 10000|Authentication error/i.test(output)) {
+    return `
+${bold('This usually means the Cloudflare account isn’t fully set up yet:')}
+  1. Verify your email: check your inbox for Cloudflare's verification email
+     (or dash.cloudflare.com → the banner at the top / My Profile).
+  2. Open dash.cloudflare.com → Workers & Pages once and finish the
+     onboarding (it picks your free *.workers.dev subdomain).
+  3. Run: npx wrangler logout && npm run deploy
+
+Still failing? Use an API token instead of the browser login:
+  dash.cloudflare.com/profile/api-tokens → Create Token → "Edit Cloudflare Workers"
+  template → add permission Account · D1 · Edit → create, then:
+  CLOUDFLARE_API_TOKEN=<token> npm run deploy
+`;
+  }
+  if (/workers\.dev subdomain|register a workers\.dev/i.test(output)) {
+    return `\n${bold('Open dash.cloudflare.com → Workers & Pages once to claim your free workers.dev subdomain, then re-run.')}\n`;
+  }
+  return '';
+}
 
 function parseJson(text) {
   const starts = [text.indexOf('['), text.indexOf('{')].filter((i) => i >= 0);
@@ -128,7 +151,7 @@ async function main() {
   let db = findDb();
   if (!db) {
     const created = wrangler(['d1', 'create', 'budgi']);
-    if (!created.ok) throw new Error(`Could not create the D1 database:\n${created.out}`);
+    if (!created.ok) throw new Error(`Could not create the D1 database:\n${created.out}\n${hintFor(created.out)}`);
     db = findDb();
   }
   if (!db?.uuid) throw new Error('Could not find the D1 database id.');
@@ -141,7 +164,7 @@ async function main() {
   step('Deploying');
   const deployed = wrangler(['deploy', '--config', deployConfig]);
   console.log(dim(deployed.out.trim().split('\n').slice(-6).join('\n')));
-  if (!deployed.ok) throw new Error(`Deploy failed. Wrangler said:\n\n${deployed.out.trim()}`);
+  if (!deployed.ok) throw new Error(`Deploy failed. Wrangler said:\n\n${deployed.out.trim()}\n${hintFor(deployed.out)}`);
   const url = deployed.out.match(/https:\/\/[a-z0-9.-]+\.workers\.dev/i)?.[0];
 
   step('Setting secrets (encrypted by Cloudflare, never in this repo)');
